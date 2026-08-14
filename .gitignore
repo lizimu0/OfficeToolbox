@@ -11,3 +11,6 @@ dist/
 .venv/
 .idea/
 .vscode/
+
+# Windows 快捷方式(本机生成,不入库)
+*.lnk
