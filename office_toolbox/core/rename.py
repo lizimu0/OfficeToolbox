@@ -24,28 +24,38 @@ def _safe_name(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', '_', name).strip()
 
 
-def rename_by_replace(paths: list[str | Path], old: str, new: str) -> list[tuple[str, str]]:
-    """文件名中的文本替换。返回 [(旧名, 新名)] 仅包含实际改名的项。"""
+def rename_by_replace(paths: list[str | Path], old: str, new: str,
+                      preview: bool = False) -> list[tuple[str, str]]:
+    """文件名中的文本替换。返回 [(旧名, 新名)] 仅包含实际改名的项。
+
+    preview=True 时只计算结果不实际改名(用于界面预演)。
+    """
     results: list[tuple[str, str]] = []
     for p in paths:
         src = Path(p)
         if old and old in src.stem:
             target = src.with_name(_safe_name(src.stem.replace(old, new)) + src.suffix)
             target = _unique_name(target)
-            src.rename(target)
+            if not preview:
+                src.rename(target)
             results.append((src.name, target.name))
     return results
 
 
 def rename_by_sequence(paths: list[str | Path], prefix: str,
-                       start: int = 1, width: int = 3) -> list[tuple[str, str]]:
-    """按列表顺序重命名为 前缀+序号。返回 [(旧名, 新名)]。"""
+                       start: int = 1, width: int = 3,
+                       preview: bool = False) -> list[tuple[str, str]]:
+    """按列表顺序重命名为 前缀+序号。返回 [(旧名, 新名)]。
+
+    preview=True 时只计算结果不实际改名。
+    """
     results: list[tuple[str, str]] = []
     for i, p in enumerate(paths, start):
         src = Path(p)
         target = src.with_name(f'{_safe_name(prefix)}{i:0{width}d}{src.suffix}')
         target = _unique_name(target)
-        src.rename(target)
+        if not preview:
+            src.rename(target)
         results.append((src.name, target.name))
     return results
 
@@ -67,8 +77,12 @@ def _load_mapping(xlsx_path: str | Path) -> dict[str, str]:
 
 
 def rename_by_mapping(paths: list[str | Path],
-                      xlsx_path: str | Path) -> tuple[list[tuple[str, str]], list[str]]:
-    """按 Excel 映射表重命名。返回 (已改名列表, 未匹配文件列表)。"""
+                      xlsx_path: str | Path,
+                      preview: bool = False) -> tuple[list[tuple[str, str]], list[str]]:
+    """按 Excel 映射表重命名。返回 (已改名列表, 未匹配文件列表)。
+
+    preview=True 时只计算结果不实际改名。
+    """
     mapping = _load_mapping(xlsx_path)
     if not mapping:
         raise ValueError('映射表中没有有效的映射数据')
@@ -82,6 +96,7 @@ def rename_by_mapping(paths: list[str | Path],
             continue
         target = src.with_name(new_stem + src.suffix)
         target = _unique_name(target)
-        src.rename(target)
+        if not preview:
+            src.rename(target)
         renamed.append((src.name, target.name))
     return renamed, skipped

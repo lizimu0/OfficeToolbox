@@ -111,13 +111,24 @@ class ConvertSession:
 
 
 def csv_to_xlsx(src: str | Path, dst: str | Path) -> None:
-    """纯 Python 实现 csv → xlsx(无需 Office)。"""
+    """纯 Python 实现 csv → xlsx(无需 Office),自动探测常见编码。"""
     import csv
+    # 依次尝试:带 BOM 的 UTF-8、UTF-8、GBK(中文 Windows 常见)
+    encodings = ('utf-8-sig', 'utf-8', 'gbk')
+    text = None
+    for enc in encodings:
+        try:
+            text = Path(src).read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        # 全部失败时用替换策略兜底，保证不崩溃
+        text = Path(src).read_text(encoding='utf-8', errors='replace')
     wb = Workbook()
     ws = wb.active
-    with open(src, newline='', encoding='utf-8-sig') as f:
-        for row in csv.reader(f):
-            ws.append(row)
+    for row in csv.reader(text.splitlines()):
+        ws.append(row)
     wb.save(str(dst))
 
 

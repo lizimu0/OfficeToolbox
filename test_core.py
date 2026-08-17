@@ -2,6 +2,7 @@
 """核心功能冒烟测试:生成样例文件并逐一验证各模块。"""
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 from docx import Document
@@ -70,6 +71,28 @@ check(f'xlsx 替换 {n} 处', n == 1 and '研发中心' in extract.extract_text(
 n = replace.replace_in_file(pptx_path, [('某某科技', '星河')])
 check(f'pptx 替换 {n} 处', n >= 1 and '星河' in extract.extract_text(pptx_path))
 
+# 正则替换(含分组引用)
+n = replace.replace_in_file(docx_path, [(r'(\d+)万元', r'\1万元整')], use_regex=True)
+regex_text = extract.extract_text(docx_path)
+check(f'docx 正则替换 {n} 处', n >= 1 and '100万元整' in regex_text)
+try:
+    replace.replace_in_file(docx_path, [('([unclosed', 'x')], use_regex=True)
+    check('无效正则报错', False)
+except ValueError:
+    check('无效正则报错', True)
+
+# 正则锚点语义:^ $ 按“整段”解释,不在 run 边界误生效
+anchor_doc = Document()
+ap = anchor_doc.add_paragraph()
+ap.add_run('foo')
+ap.add_run('bar')
+anchor_path = tmp / '锚点.docx'
+anchor_doc.save(str(anchor_path))
+n = replace.replace_in_file(anchor_path, [('^foo$', 'X')], use_regex=True)
+check('锚点正则不误匹配单 run', n == 0 and 'foobar' in extract.extract_text(anchor_path))
+n = replace.replace_in_file(anchor_path, [('foobar', 'X')], use_regex=True)
+check('正则整段命中跨 run 文本', n == 1 and extract.extract_text(anchor_path).strip() == 'X')
+
 # ---- 3. Excel 合并 ----
 print('3. Excel 合并')
 out_sheets = tmp / '合并_按表.xlsx'
@@ -92,6 +115,39 @@ files = template.generate_from_template(tpl_path, xlsx_path, out_dir, name_field
 check(f'生成 {len(files)} 个文档', len(files) == 2 and files == ['张三.docx', '李四.docx'])
 check('文档内容已填充', '张三' in extract.extract_text(out_dir / '张三.docx')
       and '{{' not in extract.extract_text(out_dir / '张三.docx'))
+
+# 图片占位符:数据源“照片”列为图片路径,生成文档应内嵌图片
+from PIL import Image  # noqa: E402
+
+img_path = tmp / '照片.png'
+Image.new('RGB', (60, 40), (200, 60, 60)).save(img_path)
+wb_photo = Workbook()
+ws_photo = wb_photo.active
+ws_photo.append(['姓名', '照片'])
+ws_photo.append(['王五', str(img_path)])
+photo_xlsx = tmp / '照片数据.xlsx'
+wb_photo.save(photo_xlsx)
+tpl2 = Document()
+tpl2.add_paragraph('姓名:{{姓名}}')
+bold_p = tpl2.add_paragraph()
+bold_run = bold_p.add_run('照片:{{图片:照片}}')
+bold_run.bold = True  # 验证图片段落重建后格式保留
+tpl2_path = tmp / '带图模板.docx'
+tpl2.save(str(tpl2_path))
+photo_out = tmp / '带图结果'
+files2 = template.generate_from_template(tpl2_path, photo_xlsx, photo_out)
+check(f'带图模板生成 {len(files2)} 个文档', len(files2) == 1)
+with zipfile.ZipFile(photo_out / '文档1.docx') as zf:
+    media = [n for n in zf.namelist() if n.startswith('word/media/')]
+check(f'文档内嵌图片({len(media)} 张)', len(media) == 1)
+photo_text = extract.extract_text(photo_out / '文档1.docx')
+check('图片占位符已清除且文字保留', '姓名:王五' in photo_text and '{{' not in photo_text)
+
+# 图片段落重建后应继承原段首 run 的字符格式(此处验证加粗)
+out_doc = Document(str(photo_out / '文档1.docx'))
+img_para = next(p for p in out_doc.paragraphs if '照片' in p.text)
+text_runs = [r for r in img_para.runs if r.text]
+check('图片段落文字保留原格式(加粗)', bool(text_runs) and all(r.bold for r in text_runs))
 
 # ---- 5. CSV → XLSX ----
 print('5. CSV 转 XLSX')

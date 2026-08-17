@@ -5,6 +5,8 @@ import zipfile
 from pathlib import Path
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from openpyxl import load_workbook
 from pptx import Presentation
 
@@ -16,12 +18,10 @@ def _extract_docx_text(path: Path) -> str:
         # 按文档顺序处理段落与表格
         tag = block.tag.rsplit('}', 1)[-1]
         if tag == 'p':
-            from docx.text.paragraph import Paragraph
             text = Paragraph(block, doc).text.strip()
             if text:
                 lines.append(text)
         elif tag == 'tbl':
-            from docx.table import Table
             table = Table(block, doc)
             for row in table.rows:
                 cells = [c.text.strip() for c in row.cells]
@@ -72,6 +72,8 @@ def _extract_pptx_text(path: Path) -> str:
 def extract_text(path: str | Path) -> str:
     """根据扩展名自动分发,返回提取出的纯文本。"""
     path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f'文件不存在: {path.name}')
     ext = path.suffix.lower()
     if ext == '.docx':
         return _extract_docx_text(path)
@@ -88,17 +90,22 @@ _IMAGE_DIRS = {'.docx': 'word/media/', '.xlsx': 'xl/media/', '.pptx': 'ppt/media
 def extract_images(path: str | Path, out_dir: str | Path) -> list[str]:
     """从 Office 文件中导出所有嵌入图片,返回保存的文件名列表。"""
     path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f'文件不存在: {path.name}')
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = _IMAGE_DIRS.get(path.suffix.lower())
     if prefix is None:
         raise ValueError(f'不支持的文件类型: {path.name}')
     saved: list[str] = []
-    with zipfile.ZipFile(str(path)) as zf:
-        for name in zf.namelist():
-            if name.startswith(prefix) and not name.endswith('/'):
-                data = zf.read(name)
-                out_name = path.stem + '_' + Path(name).name
-                (out_dir / out_name).write_bytes(data)
-                saved.append(out_name)
+    try:
+        with zipfile.ZipFile(str(path)) as zf:
+            for name in zf.namelist():
+                if name.startswith(prefix) and not name.endswith('/'):
+                    data = zf.read(name)
+                    out_name = path.stem + '_' + Path(name).name
+                    (out_dir / out_name).write_bytes(data)
+                    saved.append(out_name)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f'无法读取「{path.name}」: 文件已损坏或不是有效的 Office 文档') from exc
     return saved

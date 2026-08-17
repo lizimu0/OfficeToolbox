@@ -18,7 +18,7 @@ from .widgets import FileListWidget, LogPanel, TaskThread, notify
 
 
 class BaseTab(QWidget):
-    """标签页基类:统一持有日志面板、进度条和任务线程管理。"""
+    """标签页基类:统一持有日志面板、进度条、取消按钮和任务线程管理。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -29,19 +29,45 @@ class BaseTab(QWidget):
         self.btn_run = QPushButton('开始执行')
         self.btn_run.setProperty('class', 'primary')
         self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel = QPushButton('取消')
+        self.btn_cancel.setProperty('class', 'danger')
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+
+    def run_row(self) -> QHBoxLayout:
+        """“开始执行 + 取消”按钮行,各标签页布局统一使用。"""
+        row = QHBoxLayout()
+        row.addWidget(self.btn_run, 1)
+        row.addWidget(self.btn_cancel)
+        return row
 
     def start_task(self, func, *args):
         if self._thread is not None and self._thread.isRunning():
             QMessageBox.information(self, '提示', '当前有任务正在执行,请稍候。')
             return False
-        self.btn_run.setEnabled(False)
+        self.btn_run.setVisible(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setVisible(True)
         self.progress.setValue(0)
         self._thread = TaskThread(func, *args, parent=self)
         self._thread.progress.connect(self._on_progress)
         self._thread.finished_ok.connect(self._on_success)
         self._thread.failed.connect(self._on_failed)
+        self._thread.cancelled.connect(self._on_cancelled)
         self._thread.start()
         return True
+
+    def _task_done(self):
+        self.btn_cancel.setVisible(False)
+        self.btn_run.setVisible(True)
+        self.btn_run.setEnabled(True)
+
+    def _on_cancel_clicked(self):
+        if self._thread is not None and self._thread.isRunning():
+            self.btn_cancel.setEnabled(False)
+            self.log_panel.log('正在取消,等待当前文件处理完成...')
+            self._thread.request_cancel()
 
     def _on_progress(self, current: int, total: int, message: str):
         if total > 0:
@@ -50,16 +76,21 @@ class BaseTab(QWidget):
         self.log_panel.log(message)
 
     def _on_success(self, result):
-        self.btn_run.setEnabled(True)
+        self._task_done()
         self.progress.setValue(self.progress.maximum())
         self.log_panel.log(f'任务完成。{result or ""}')
         notify('任务完成', str(result or ''))
 
     def _on_failed(self, error: str):
-        self.btn_run.setEnabled(True)
+        self._task_done()
         self.log_panel.log(f'任务失败: {error}')
         notify('任务失败', error)
         QMessageBox.critical(self, '执行失败', error)
+
+    def _on_cancelled(self):
+        self._task_done()
+        self.log_panel.log('任务已取消。')
+        notify('任务已取消', '用户取消了本次任务')
 
 
 class ExtractTab(BaseTab):
@@ -92,7 +123,7 @@ class ExtractTab(BaseTab):
         layout.addWidget(self.file_list, 3)
         layout.addLayout(out_row)
         layout.addLayout(mode_row)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -117,22 +148,28 @@ class ExtractTab(BaseTab):
             out_dir = Path(out_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             total = len(paths)
+            ok, fail = 0, 0
             merged: list[str] = []
             for i, p in enumerate(paths, 1):
                 name = Path(p).name
                 progress(i, total, f'[{i}/{total}] 处理 {name}')
-                if mode == 2:
-                    saved = extract.extract_images(p, out_dir)
-                    progress(i, total, f'    导出图片 {len(saved)} 张')
-                else:
-                    text = extract.extract_text(p)
-                    if mode == 0:
-                        (out_dir / (Path(p).stem + '.txt')).write_text(text, encoding='utf-8')
+                try:
+                    if mode == 2:
+                        saved = extract.extract_images(p, out_dir)
+                        progress(i, total, f'    导出图片 {len(saved)} 张')
                     else:
-                        merged.append(f'========== {name} ==========\n{text}')
-            if mode == 1:
+                        text = extract.extract_text(p)
+                        if mode == 0:
+                            (out_dir / (Path(p).stem + '.txt')).write_text(text, encoding='utf-8')
+                        else:
+                            merged.append(f'========== {name} ==========\n{text}')
+                    ok += 1
+                except Exception as exc:
+                    progress(i, total, f'    失败: {exc}')
+                    fail += 1
+            if mode == 1 and merged:
                 (out_dir / '合并提取.txt').write_text('\n\n'.join(merged), encoding='utf-8')
-            return f'共处理 {total} 个文件,结果已保存到 {out_dir}'
+            return f'成功 {ok} 个,失败 {fail} 个,结果已保存到 {out_dir}'
 
         self.start_task(task, paths, out_dir, mode)
 
@@ -167,6 +204,10 @@ class ReplaceTab(BaseTab):
         backup_row.addWidget(self.edit_backup_dir, 1)
         backup_row.addWidget(btn_backup_dir)
 
+        self.chk_regex = QCheckBox('查找内容使用正则表达式(替换为中可用 \\1 引用分组)')
+        self.chk_regex.setObjectName('replace_regex')
+        self.chk_regex.setToolTip('勾选后“查找内容”按正则表达式解释,例如 \\d{4}年 或 (\\w+)@(\\w+)')
+
         tip = QLabel('提示:替换将直接保存到原文件。支持 docx / xlsx / pptx。')
         tip.setStyleSheet('color: #888;')
 
@@ -182,10 +223,11 @@ class ReplaceTab(BaseTab):
         row.addWidget(btn_del_pair)
         row.addStretch(1)
         pair_layout.addLayout(row)
+        pair_layout.addWidget(self.chk_regex)
         layout.addWidget(pair_box, 2)
         layout.addLayout(backup_row)
         layout.addWidget(tip)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -224,8 +266,9 @@ class ReplaceTab(BaseTab):
         if self.chk_backup.isChecked() and not backup_dir:
             QMessageBox.warning(self, '提示', '请选择备份目录,或取消勾选备份选项。')
             return
+        use_regex = self.chk_regex.isChecked()
 
-        def task(progress, paths, pairs, backup_dir):
+        def task(progress, paths, pairs, backup_dir, use_regex):
             import datetime
             total = len(paths)
             ok, fail = 0, 0
@@ -239,7 +282,7 @@ class ReplaceTab(BaseTab):
                 try:
                     if backup_dir:
                         shutil.copy2(p, backup_root / name)
-                    count = replace.replace_in_file(p, pairs)
+                    count = replace.replace_in_file(p, pairs, use_regex=use_regex)
                     progress(i, total, f'    替换 {count} 处')
                     ok += 1
                 except Exception as exc:
@@ -247,7 +290,7 @@ class ReplaceTab(BaseTab):
                     fail += 1
             return f'成功 {ok} 个,失败 {fail} 个'
 
-        self.start_task(task, paths, pairs, backup_dir)
+        self.start_task(task, paths, pairs, backup_dir, use_regex)
 
 
 class MergeExcelTab(BaseTab):
@@ -280,7 +323,7 @@ class MergeExcelTab(BaseTab):
         layout.addWidget(self.file_list, 3)
         layout.addLayout(mode_row)
         layout.addLayout(out_row)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -335,7 +378,8 @@ class TemplateTab(BaseTab):
         name_row.addWidget(QLabel('(用该字段作为生成文件的文件名)'))
         form.addRow('命名方式:', name_row)
 
-        tip = QLabel('模板中用 {{字段名}} 作为占位符,字段名需与数据源首行表头一致。')
+        tip = QLabel('模板中用 {{字段名}} 作为占位符,字段名需与数据源首行表头一致;'
+                     '用 {{图片:字段名}} 插入图片,字段值为图片文件路径。')
         tip.setStyleSheet('color: #888;')
 
         layout = QVBoxLayout(self)
@@ -343,7 +387,7 @@ class TemplateTab(BaseTab):
         layout.setSpacing(10)
         layout.addLayout(form)
         layout.addWidget(tip)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -430,7 +474,7 @@ class ConvertTab(BaseTab):
         layout.addWidget(self.file_list, 3)
         layout.addLayout(mode_row)
         layout.addWidget(tip)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -526,7 +570,7 @@ class SplitMergeTab(BaseTab):
         layout.addLayout(src_row)
         layout.addLayout(out_row)
         layout.addWidget(self.tip)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -659,7 +703,7 @@ class RenameTab(BaseTab):
         rule_layout.addWidget(self.radio_map)
         rule_layout.addLayout(row_map)
 
-        tip = QLabel('映射表格式:首行表头,第一列原文件名,第二列新文件名。重命名在原目录进行,重名自动加后缀。')
+        tip = QLabel('映射表格式:首行表头,第一列原文件名,第二列新文件名。执行前会弹出预览确认;重命名在原目录进行,重名自动加后缀。')
         tip.setStyleSheet('color: #888;')
 
         layout = QVBoxLayout(self)
@@ -668,7 +712,7 @@ class RenameTab(BaseTab):
         layout.addWidget(self.file_list, 3)
         layout.addWidget(rule_box, 2)
         layout.addWidget(tip)
-        layout.addWidget(self.btn_run)
+        layout.addLayout(self.run_row())
         layout.addWidget(self.progress)
         layout.addWidget(self.log_panel, 2)
         self.btn_run.clicked.connect(self.run_task)
@@ -677,6 +721,25 @@ class RenameTab(BaseTab):
         path, _ = QFileDialog.getOpenFileName(self, '选择映射表', '', 'Excel 文件 (*.xlsx)')
         if path:
             self.edit_mapping.setText(path)
+
+    def _confirm_rename(self, preview_pairs: list[tuple[str, str]],
+                        skipped: list[str] | None = None) -> bool:
+        """弹出预演确认对话框,返回用户是否同意执行。"""
+        if not preview_pairs:
+            QMessageBox.information(self, '提示', '没有需要重命名的文件。')
+            return False
+        lines = [f'{old}  →  {new}' for old, new in preview_pairs[:20]]
+        if len(preview_pairs) > 20:
+            lines.append(f'... 以及其余 {len(preview_pairs) - 20} 个')
+        text = f'将重命名 {len(preview_pairs)} 个文件:\n\n' + '\n'.join(lines)
+        if skipped:
+            text += f'\n\n未匹配(将跳过){len(skipped)} 个。'
+        text += '\n\n确定执行吗?'
+        reply = QMessageBox.question(self, '重命名预览', text,
+                                     QMessageBox.StandardButton.Yes
+                                     | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        return reply == QMessageBox.StandardButton.Yes
 
     def run_task(self):
         paths = self.file_list.paths()
@@ -689,6 +752,9 @@ class RenameTab(BaseTab):
             if not old:
                 QMessageBox.warning(self, '提示', '请填写要替换的文本。')
                 return
+            preview = rename.rename_by_replace(paths, old, new, preview=True)
+            if not self._confirm_rename(preview):
+                return
 
             def task_replace(progress, paths, old, new):
                 progress(0, 1, '正在重命名...')
@@ -698,6 +764,9 @@ class RenameTab(BaseTab):
             self.start_task(task_replace, paths, old, new)
         elif self.radio_seq.isChecked():
             prefix, start = self.edit_prefix.text(), self.spin_start.value()
+            preview = rename.rename_by_sequence(paths, prefix, start, preview=True)
+            if not self._confirm_rename(preview):
+                return
 
             def task_seq(progress, paths, prefix, start):
                 progress(0, 1, '正在重命名...')
@@ -709,6 +778,13 @@ class RenameTab(BaseTab):
             mapping = self.edit_mapping.text().strip()
             if not mapping:
                 QMessageBox.warning(self, '提示', '请选择映射表。')
+                return
+            try:
+                preview, skipped = rename.rename_by_mapping(paths, mapping, preview=True)
+            except Exception as exc:
+                QMessageBox.warning(self, '提示', str(exc))
+                return
+            if not self._confirm_rename(preview, skipped):
                 return
 
             def task_map(progress, paths, mapping):
@@ -724,21 +800,23 @@ class RenameTab(BaseTab):
 
 HELP_HTML = """
 <h2>Office 自动化工具箱 使用说明</h2>
-<p>所有标签页都支持<b>拖拽文件或文件夹</b>到列表区,文件夹会自动递归扫描其中的 Office 文件。</p>
+<p>所有标签页都支持<b>拖拽文件或文件夹</b>到列表区,文件夹会自动递归扫描其中的 Office 文件;任务执行中可随时点击<b>取消</b>按钮中止。单文件出错不会中断整批任务,详见日志。</p>
 <h3>文本提取</h3>
 <p>从 docx/xlsx/pptx 批量提取文字或导出嵌入图片,可选每个文件一个 txt 或全部合并。</p>
 <h3>批量替换</h3>
-<p>在多个文件中按规则替换文本,默认先把原文件备份到指定目录(每次执行生成一个时间戳子文件夹)。</p>
+<p>在多个文件中按规则替换文本,默认先把原文件备份到指定目录(每次执行生成一个时间戳子文件夹)。勾选<b>正则表达式</b>后,查找内容按正则解释,替换为中可用 <code>\\1</code> 引用分组,例如把 <code>(\\d+)年</code> 替换为 <code>\\1年度</code>。</p>
 <h3>Excel 合并</h3>
 <p>“按行追加”适合表头相同的报表;“每个文件一个工作表”适合汇总不同文件。</p>
 <h3>模板生成</h3>
-<p>Word 模板中用 <code>{{字段名}}</code> 占位,字段名与数据源 Excel 首行表头一致,每行数据生成一份文档。</p>
+<p>Word 模板中用 <code>{{字段名}}</code> 占位,字段名与数据源 Excel 首行表头一致,每行数据生成一份文档;用 <code>{{图片:字段名}}</code>(或 <code>{{img:字段名}}</code>)插入图片,该字段的值为本地图片文件路径,过宽图片会自动等比缩小。</p>
 <h3>格式转换</h3>
 <p>docx/xlsx/pptx 转 PDF 需本机安装 Microsoft Office,输出在源文件同目录;csv 转 xlsx 无需 Office。</p>
 <h3>合并拆分</h3>
 <p>PDF 合并按列表顺序拼接;PDF 拆分可按每 N 页一份;Word 合并把多个 docx 顺序拼接为一篇。</p>
 <h3>批量重命名</h3>
 <p>三种规则:文件名文本替换、前缀+序号、Excel 映射表(第一列原名、第二列新名)。重名自动加后缀避免覆盖。</p>
+<h3>主题</h3>
+<p>可在菜单栏“视图”中切换浅色/深色主题,选择会被自动记住。</p>
 """
 
 

@@ -135,27 +135,45 @@ class LogPanel(QPlainTextEdit):
         self.appendPlainText(message)
 
 
+class TaskCancelled(Exception):
+    """任务被用户取消时,通过 progress 回调抛出以中断执行。"""
+
+
 class TaskThread(QThread):
     """通用后台任务线程:执行耗时函数并通过信号回报进度。
 
     func 接受一个 progress 回调:progress(current, total, message)。
+    用户请求取消后,下一次 progress 调用即抛出 TaskCancelled 中断任务。
     """
 
     progress = Signal(int, int, str)   # current, total, message
     finished_ok = Signal(object)        # 任务结果
     failed = Signal(str)                # 错误信息
+    cancelled = Signal()                # 任务被取消
 
     def __init__(self, func, *args, parent=None):
         super().__init__(parent)
         self._func = func
         self._args = args
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        """请求取消:任务在下一个进度点中止。"""
+        self._cancel_requested = True
 
     def run(self):
         try:
             result = self._func(self._report, *self._args)
-            self.finished_ok.emit(result)
+            if self._cancel_requested:
+                self.cancelled.emit()
+            else:
+                self.finished_ok.emit(result)
+        except TaskCancelled:
+            self.cancelled.emit()
         except Exception as exc:  # 统一兜底,避免线程异常退出无提示
             self.failed.emit(str(exc))
 
     def _report(self, current: int, total: int, message: str) -> None:
+        if self._cancel_requested:
+            raise TaskCancelled()
         self.progress.emit(current, total, message)

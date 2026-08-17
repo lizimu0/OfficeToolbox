@@ -1,8 +1,8 @@
-"""主窗口:多标签页工具箱,含使用习惯记忆。"""
+"""主窗口:多标签页工具箱,含使用习惯记忆与浅色/深色主题切换。"""
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QLineEdit, QMainWindow,
-                               QSpinBox, QTabWidget)
+                               QMenu, QSpinBox, QTabWidget)
 
 from . import styles
 from .tabs import (ConvertTab, ExtractTab, HelpTab, MergeExcelTab, RenameTab,
@@ -17,9 +17,10 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(icon_path()))
         self.resize(980, 700)
         self.setMinimumSize(860, 600)
-        styles.apply(self)
 
         self.settings = QSettings('OfficeToolbox', 'settings')
+        self._dark = str(self.settings.value('theme/dark', 'false')) == 'true'
+        styles.apply(self, self._dark)
 
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
@@ -33,7 +34,29 @@ class MainWindow(QMainWindow):
         tabs.addTab(HelpTab(), '使用帮助')
         self.setCentralWidget(tabs)
 
+        self._build_menu()
         self._restore_settings()
+
+    # ---------- 主题菜单 ----------
+    def _build_menu(self):
+        view_menu: QMenu = self.menuBar().addMenu('视图')
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self._act_light = QAction('浅色主题', self, checkable=True, checked=not self._dark)
+        self._act_dark = QAction('深色主题', self, checkable=True, checked=self._dark)
+        group.addAction(self._act_light)
+        group.addAction(self._act_dark)
+        self._act_light.triggered.connect(lambda: self._set_theme(False))
+        self._act_dark.triggered.connect(lambda: self._set_theme(True))
+        view_menu.addAction(self._act_light)
+        view_menu.addAction(self._act_dark)
+
+    def _set_theme(self, dark: bool):
+        if dark == self._dark:
+            return
+        self._dark = dark
+        self.settings.setValue('theme/dark', dark)
+        styles.apply(self, dark)
 
     # ---------- 使用习惯记忆 ----------
     def _persistable_widgets(self):
