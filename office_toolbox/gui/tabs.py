@@ -281,7 +281,9 @@ class ReplaceTab(BaseTab):
                 progress(i, total, f'[{i}/{total}] 处理 {name}')
                 try:
                     if backup_dir:
-                        shutil.copy2(p, backup_root / name)
+                        # 不同目录加入的同名文件会互相覆盖备份,而 replace 直接改写原文件,
+                        # 先到者将失去恢复点 —— 套用 _unique_name 追加序号避免覆盖。
+                        shutil.copy2(p, rename._unique_name(backup_root / name))
                     count = replace.replace_in_file(p, pairs, use_regex=use_regex)
                     progress(i, total, f'    替换 {count} 处')
                     ok += 1
